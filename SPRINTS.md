@@ -1,0 +1,85 @@
+# Options Income Bot — Sprint Plan (Infra First, Logic Last)
+
+**Principle:** Build the entire pipeline as a "walking skeleton" with a stub engine, prove every
+pipe end-to-end, then swap real logic in last. No strategy code until data flows reliably.
+
+---
+
+## PHASE A — INFRASTRUCTURE (Sprints 0–4)
+
+### Sprint 0 — Scaffold (half day)
+- Repo init, `CLAUDE.md` (stack, conventions, "LLM never computes trade math")
+- `.env` + `.gitignore` hygiene; GitHub Actions secrets configured
+- Python project skeleton (`uv` or `poetry`), pytest wired, ruff/lint
+- Hello-world GH Actions cron: runs nightly, writes one heartbeat row to Supabase
+- **Exit criteria:** scheduled job runs in CI and lands a row in the cloud DB
+
+### Sprint 1 — Data Stores
+- Supabase schema migration, 4 tables:
+  - `positions` (snapshot per sync)
+  - `iv_history` (ticker, date, atm_iv)
+  - `suggestions` (+ `decision_snapshot` JSONB, `rule_version`, `taken`)
+  - `outcomes` (+ `realized_pnl`, `max_adverse_excursion`, `counterfactual_pnl`)
+- `rules_v1.yaml` scaffold (empty thresholds, versioned in git from day one)
+- Thin DB access layer + tests against a local/branch database
+- **Exit criteria:** migrations reproducible from scratch; CRUD tested
+
+### Sprint 2 — Portfolio Pipe (SnapTrade)
+- SnapTrade personal API key, one-time OAuth link to Robinhood (read-only)
+- Sync script: SnapTrade → normalized rows → `positions`
+- Failure handling: stale-token detection → loud Telegram/log alert (never silent stale data)
+- Wire into a cron (can piggyback the heartbeat job)
+- **Exit criteria:** positions + cash land in Supabase automatically; raw sync only, zero interpretation
+
+### Sprint 3 — Market Data Pipe (ThetaData)
+- Theta Terminal wrapper: launch Java process, auth, health-check, query, teardown
+  (works locally AND inside GH Actions runner)
+- Backfill script: 1 year EOD ATM IV per tracked ticker → `iv_history`
+- Daily cron (weeknights ~6pm PT): append EOD IV snapshot
+- Chain fetch function: ticker → strikes/bid/ask/delta/IV/OI as clean dataframe (fetch only, no filtering)
+- **Exit criteria:** `iv_history` backfilled + growing daily on its own; chain fetch returns clean data in CI
+- ⚠️ **Start the daily cron the moment it works** — every day it runs is history you own
+
+### Sprint 4 — Orchestration + Delivery (Walking Skeleton Complete)
+- Sunday cron: sync → fetch chains → **STUB engine** (pass-through: dumps raw eligible data, no decisions)
+- Claude API wiring with a dummy prompt ("summarize this data") to prove the call path
+- Telegram bot (or email) delivery of the stub brief
+- Stub output written to `suggestions` with `rule_version = "stub"`
+- **Exit criteria:** every Sunday, an automated (dumb) brief arrives on your phone.
+  All pipes live: broker → DB → data → LLM → delivery. Zero strategy logic exists yet.
+
+---
+
+## PHASE B — LOGIC (Sprints 5–7)
+
+### Sprint 5 — Strategy Engine (swap the stub)
+All pure functions, unit-tested, driven entirely by `rules_v1.yaml`:
+- Eligibility classifier (≥100 sh → CC; cash ÷ strike×100 → CSP capacity; odd lots skipped)
+- IV-rank signal (percentile vs `iv_history`; below threshold → stand down)
+- Exclusions (earnings ≤14d via yfinance, ex-div before expiry on short calls, OI/spread liquidity floors)
+- Strike selection (CC ~0.25–0.30Δ, CSP ~0.20–0.30Δ, 30–45 DTE, rank by annualized premium yield)
+- Position sizing (≤5% notional per name, ≤20% cash committed to CSPs)
+- Real Claude rationale prompt (computed numbers in, prose out)
+- **Exit criteria:** Sunday brief now contains real ranked suggestions with full decision snapshots
+
+### Sprint 6 — Reflection Layer
+- Extend daily cron: mark-to-market open suggestions (feeds max adverse excursion)
+- Expiry scorer → `outcomes`: realized P&L, MAE, counterfactuals (vs hold, vs cash), `taken` flag
+- Attribution SQL: performance by strategy / IV-rank bucket / delta bucket / ticker / DTE
+- Dashboard tab on existing React app rendering attribution
+- **Exit criteria:** every expired suggestion auto-scored; attribution queryable
+
+### Sprint 7 — Retro Loop
+- Monthly Claude retrospective over attribution tables
+- Rule-change *proposals* only (hard-coded min-N guard; weight by P&L, never hit rate)
+- `rules_vN.yaml` versioning + stamping; rollback = git revert
+- **Exit criteria:** first monthly retro lands with proposals; you approve/reject manually
+
+---
+
+## Sequencing Notes
+- Natural pause after Sprint 5: run live 6–8 weeks before Sprints 6–7 mean anything
+- Sprint 2 and 3 are independent — parallelize if using Claude Code on both
+- Dev environment: local VS Code + Claude Code preferred (Theta Terminal = local Java process);
+  Codespaces works but add Java + terminal launch to devcontainer
+- Production runtime is GitHub Actions throughout — dev choice never affects prod
