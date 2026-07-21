@@ -1,0 +1,50 @@
+name: daily
+# Daily data collection. Deliberately separate from ci.yml: a red X here means
+# "the data pipe broke", not "somebody's formatting is off" (iron rule #4 — an
+# alert nobody trusts is not an alert). Sprint 3's EOD IV snapshot becomes a
+# second step in this same job.
+on:
+  workflow_dispatch:      # manual re-run after a failure, without waiting a day
+  schedule:
+    # 01:00 UTC = 6pm PT (PDT) / 5pm PT (PST) — after the US close, so holdings
+    # reflect the completed session. GitHub cron is UTC-only and does not track
+    # daylight saving; the hour drifts by one across the DST boundary.
+    - cron: "0 1 * * *"
+
+# A late run must never overlap a manual one and write two snapshots at once.
+concurrency:
+  group: daily
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      SNAPTRADE_CLIENT_ID: ${{ secrets.SNAPTRADE_CLIENT_ID }}
+      SNAPTRADE_CONSUMER_KEY: ${{ secrets.SNAPTRADE_CONSUMER_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+
+      # Fail before the network call if a secret is missing or was renamed —
+      # otherwise the error surfaces as a confusing auth failure mid-sync.
+      - name: check secrets are present
+        run: |
+          missing=""
+          for name in SUPABASE_URL SUPABASE_SERVICE_KEY \
+                      SNAPTRADE_CLIENT_ID SNAPTRADE_CONSUMER_KEY; do
+            [ -z "${!name}" ] && missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::missing repository secrets:$missing"
+            exit 1
+          fi
+
+      # Writes one positions snapshot. Exits non-zero on stale brokerage data
+      # rather than recording it, so a failed run is the alert until Telegram
+      # delivery lands in Sprint 4.
+      - name: sync portfolio
+        run: uv run python -m src.sync

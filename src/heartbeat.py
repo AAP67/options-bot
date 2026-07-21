@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 
+from src.config import load_dotenv
 from src.db import DB
 
 
@@ -31,6 +32,7 @@ def build_row() -> dict[str, str]:
 
 
 def main() -> int:
+    load_dotenv()
     db = DB.from_env()
     written = db.insert_heartbeat(build_row())
     if not written:
