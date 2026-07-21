@@ -1,0 +1,40 @@
+# rules_v1.yaml — versioned strategy thresholds.
+#
+# Iron rule #2: no magic numbers in engine code. Every threshold lives here.
+# Rule changes = a NEW version file (rules_v2.yaml, ...), never edit this one.
+# Every suggestion row is stamped with the rule_version that produced it.
+#
+# Sprint 1 scaffold: structure only, values are placeholders (null) and get
+# filled in when the strategy engine lands in Sprint 5. Keys mirror the engine's
+# pure functions (eligibility, iv_rank, exclusions, selection, sizing).
+
+version: v1
+
+eligibility:
+  min_shares_per_cc: 100        # covered call needs >=100 shares (US standard lot)
+  skip_odd_lots: true
+
+iv_rank:
+  lookback_days: null           # trailing window for percentile
+  min_iv_rank: null             # below this -> stand down, no suggestion
+
+exclusions:
+  earnings_blackout_days: null  # skip if earnings within N days
+  ex_div_before_expiry: true    # skip short calls with ex-div before expiry
+  min_open_interest: null
+  max_bid_ask_spread_pct: null
+
+selection:
+  covered_call:
+    target_delta_low: null      # e.g. 0.25
+    target_delta_high: null     # e.g. 0.30
+  cash_secured_put:
+    target_delta_low: null      # e.g. 0.20
+    target_delta_high: null     # e.g. 0.30
+  dte_min: null                 # e.g. 30
+  dte_max: null                 # e.g. 45
+  rank_by: annualized_premium_yield
+
+sizing:
+  max_notional_pct_per_name: null   # e.g. 0.05
+  max_cash_pct_for_csps: null       # e.g. 0.20

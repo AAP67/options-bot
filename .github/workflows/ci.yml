@@ -13,3 +13,39 @@ jobs:
       - run: uv sync
       - run: uv run ruff check .
       - run: uv run pytest
+
+  # Sprint 1 exit criteria: the migrations must rebuild the schema from nothing.
+  # Replays supabase/migrations/*.sql into an empty Postgres and asserts the result.
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/verify_migrations.sh
+
+  heartbeat:
+    needs: [test, migrations]
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      # Proof-of-life: land one row in Supabase. Skipped only if secrets are
+      # absent (e.g. a fork) — never silently on the real repo.
+      - if: env.SUPABASE_URL != ''
+        run: uv run python -m src.heartbeat
