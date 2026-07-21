@@ -60,6 +60,18 @@ def test_live_connection_is_fresh(live_accounts):
     assert sync.check_freshness(live_accounts, dt.datetime.now(dt.UTC)) == []
 
 
+def test_live_connection_is_not_disabled(live_snaptrade, live_accounts):
+    """Every account's authorization resolves and is enabled.
+
+    Also proves the account -> authorization join still works: if SnapTrade
+    changed `brokerage_authorization` from an id to an object (or vice versa),
+    this fails rather than silently reporting every account as unlinked.
+    """
+    authorizations = sync.fetch_authorizations(live_snaptrade)
+    assert authorizations, "SnapTrade listed no brokerage authorizations"
+    assert sync.check_connections(live_accounts, authorizations) == []
+
+
 def test_option_cost_basis_is_still_per_contract(live_option_positions):
     """The invariant the normalizer depends on — asserted against live data.
 

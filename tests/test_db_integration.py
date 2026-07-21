@@ -30,6 +30,7 @@ def cleanup(integration_db, tag):
     integration_db.delete("positions", {"account_id": tag})
     integration_db.delete("iv_history", {"ticker": tag})
     integration_db.delete("heartbeat", {"note": tag})
+    integration_db.delete("sync_runs", {"error": tag})
 
 
 def test_positions_insert_and_read_back(integration_db, tag, cleanup):
@@ -110,6 +111,46 @@ def test_suggestion_and_outcome_lifecycle(integration_db, tag, cleanup):
     outcomes = integration_db.select("outcomes", filters={"suggestion_id": suggestion_id})
     assert len(outcomes) == 1, "one outcome per suggestion; re-scoring updates in place"
     assert float(rescored[0]["realized_pnl"]) == 380.0
+
+
+def test_sync_run_records_broker_refresh_metadata(integration_db, tag, cleanup):
+    """The jsonb detail must survive the round trip — it is the whole payload.
+
+    This is the evidence that sets MAX_HOLDINGS_AGE, and it cannot be
+    reconstructed after the fact, so a silent schema mismatch would be costly.
+    """
+    synced_at = dt.datetime.now(dt.UTC).isoformat()
+    written = integration_db.insert_sync_run(
+        {
+            "synced_at": synced_at,
+            "status": "partial",
+            "rows_written": 26,
+            "error": tag,
+            "accounts": {
+                "acct-1": {
+                    "name": "Robinhood Individual",
+                    "included": True,
+                    "last_successful_sync": "2026-07-21T17:17:40.750897+00:00",
+                    "problems": [],
+                },
+                "acct-2": {
+                    "name": "Robinhood Crypto",
+                    "included": False,
+                    "last_successful_sync": None,
+                    "problems": ["brokerage connection disabled"],
+                },
+            },
+        }
+    )
+
+    assert written and written[0]["id"]
+    row = written[0]
+    assert row["status"] == "partial"
+    assert row["rows_written"] == 26
+    # jsonb round-trips with nested structure intact
+    assert row["accounts"]["acct-1"]["last_successful_sync"].startswith("2026-07-21")
+    assert row["accounts"]["acct-2"]["included"] is False
+    assert row["accounts"]["acct-2"]["problems"] == ["brokerage connection disabled"]
 
 
 def test_heartbeat_insert_and_delete(integration_db, tag, cleanup):

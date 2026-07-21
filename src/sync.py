@@ -62,6 +62,30 @@ class SyncError(RuntimeError):
     """Raised when a sync cannot be trusted — never swallowed, never silent."""
 
 
+class PartialSyncError(SyncError):
+    """Some accounts synced, others were excluded as untrustworthy.
+
+    The healthy rows are already written by the time this is raised: position
+    history cannot be backfilled, so a problem in one account must never cost
+    the snapshot of another. It still subclasses SyncError, so a caller that
+    does not care about the distinction fails loudly by default.
+    """
+
+    def __init__(
+        self,
+        written: list[dict[str, Any]],
+        excluded: dict[str, list[str]],
+    ) -> None:
+        self.written = written
+        self.excluded = excluded
+        detail = "; ".join(
+            f"{name} ({', '.join(problems)})" for name, problems in excluded.items()
+        )
+        super().__init__(
+            f"wrote {len(written)} rows but excluded {len(excluded)} account(s): {detail}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # pure normalization — no I/O, fully unit-testable
 # ---------------------------------------------------------------------------
@@ -180,35 +204,157 @@ def _last_holdings_sync(account: dict[str, Any]) -> dt.datetime | None:
     return parsed
 
 
+def _authorization_id(account: dict[str, Any]) -> str | None:
+    """The brokerage authorization backing an account, id or embedded object."""
+    auth = account.get("brokerage_authorization")
+    if isinstance(auth, dict) or hasattr(auth, "keys"):
+        return str(_as_dict(auth).get("id") or "") or None
+    return str(auth) if auth else None
+
+
+def check_connections(
+    accounts: list[dict[str, Any]],
+    authorizations: list[dict[str, Any]],
+) -> list[str]:
+    """Return a complaint per account whose broker connection is broken.
+
+    This is the authoritative staleness signal, and it is checked before
+    `check_freshness`. SnapTrade's own docs are explicit that a disabled
+    connection "can no longer access the latest data from the brokerage, but
+    will continue to return the last available cached state" — so holdings keep
+    arriving, looking perfectly normal, indefinitely. `disabled` says so
+    directly; timestamp age only infers it.
+    """
+    by_id = {str(auth.get("id")): auth for auth in authorizations}
+    return [
+        problem
+        for account in accounts
+        for problem in _connection_problems(account, by_id)
+    ]
+
+
+def _connection_problems(
+    account: dict[str, Any],
+    authorizations_by_id: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Connection complaints for a single account."""
+    name = str(account.get("name") or account.get("id"))
+    auth_id = _authorization_id(account)
+    if not auth_id:
+        return [f"{name}: no brokerage authorization reported"]
+    auth = authorizations_by_id.get(auth_id)
+    if auth is None:
+        # The account references a connection SnapTrade no longer lists —
+        # treat as broken rather than assuming it is fine.
+        return [f"{name}: brokerage authorization {auth_id} not found"]
+    if auth.get("disabled"):
+        since = auth.get("disabled_date") or "unknown date"
+        return [
+            f"{name}: brokerage connection disabled since {since} — "
+            "holdings are cached, not live. See "
+            "https://docs.snaptrade.com/docs/fix-broken-connections"
+        ]
+    return []
+
+
 def check_freshness(
     accounts: list[dict[str, Any]],
     now: dt.datetime,
     max_age: dt.timedelta = MAX_HOLDINGS_AGE,
 ) -> list[str]:
-    """Return a complaint per account whose holdings can't be trusted.
+    """Return a complaint per account whose holdings are too old to trust.
 
-    An empty list means every account is fresh. Callers must treat a non-empty
-    list as fatal — SnapTrade serves stale cached holdings silently when a
-    connection breaks, and stale positions would produce confident nonsense.
+    The secondary staleness signal, behind `check_connections`: it catches a
+    connection that has quietly stopped refreshing without being marked
+    disabled. An empty list means every account is fresh. Callers must treat a
+    non-empty list as fatal — stale positions produce confident nonsense.
     """
-    problems: list[str] = []
+    return [
+        problem
+        for account in accounts
+        for problem in _freshness_problems(account, now, max_age)
+    ]
+
+
+def _freshness_problems(
+    account: dict[str, Any],
+    now: dt.datetime,
+    max_age: dt.timedelta,
+) -> list[str]:
+    """Freshness complaints for a single account."""
+    name = str(account.get("name") or account.get("id"))
+    if str(account.get("status") or "").lower() not in ("open", ""):
+        return [f"{name}: account status is {account.get('status')!r}"]
+    last = _last_holdings_sync(account)
+    if last is None:
+        return [f"{name}: no completed holdings sync reported"]
+    age = now - last
+    if age > max_age:
+        hours = age.total_seconds() / 3600
+        return [
+            f"{name}: holdings last synced {hours:.1f}h ago "
+            f"(limit {max_age.total_seconds() / 3600:.0f}h)"
+        ]
+    return []
+
+
+def problems_by_account(
+    accounts: list[dict[str, Any]],
+    authorizations: list[dict[str, Any]],
+    now: dt.datetime,
+    max_age: dt.timedelta = MAX_HOLDINGS_AGE,
+) -> dict[str, list[str]]:
+    """Every account's health complaints, keyed by account id.
+
+    The keyed view is what lets `sync()` exclude one bad account instead of
+    abandoning the whole snapshot — a stale crypto connection must not cost the
+    equity history the strategy actually runs on.
+    """
+    by_id = {str(auth.get("id")): auth for auth in authorizations}
+    return {
+        str(account.get("id")): (
+            _connection_problems(account, by_id)
+            + _freshness_problems(account, now, max_age)
+        )
+        for account in accounts
+    }
+
+
+def build_run_row(
+    synced_at: str,
+    accounts: list[dict[str, Any]],
+    problems: dict[str, list[str]],
+    included_ids: set[str],
+    rows_written: int,
+    status: str,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Assemble the `sync_runs` row describing one attempt.
+
+    Captures each account's `last_successful_sync` verbatim — the broker's own
+    refresh timestamp, which the freshness check consumes and would otherwise
+    discard. It is the only record of whether SnapTrade refreshes on non-trading
+    days, and it cannot be reconstructed after the fact.
+    """
+    detail: dict[str, Any] = {}
     for account in accounts:
-        name = str(account.get("name") or account.get("id"))
-        if str(account.get("status") or "").lower() not in ("open", ""):
-            problems.append(f"{name}: account status is {account.get('status')!r}")
-            continue
-        last = _last_holdings_sync(account)
-        if last is None:
-            problems.append(f"{name}: no completed holdings sync reported")
-            continue
-        age = now - last
-        if age > max_age:
-            hours = age.total_seconds() / 3600
-            problems.append(
-                f"{name}: holdings last synced {hours:.1f}h ago "
-                f"(limit {max_age.total_seconds() / 3600:.0f}h)"
-            )
-    return problems
+        account_id = str(account.get("id"))
+        holdings = _as_dict(_as_dict(account.get("sync_status")).get("holdings"))
+        detail[account_id] = {
+            "name": account.get("name"),
+            "included": account_id in included_ids,
+            "status": account.get("status"),
+            "last_successful_sync": holdings.get("last_successful_sync"),
+            "initial_sync_completed": holdings.get("initial_sync_completed"),
+            "problems": problems.get(account_id, []),
+        }
+    return {
+        "synced_at": synced_at,
+        "status": status,
+        "rows_written": rows_written,
+        "accounts": detail,
+        "error": error,
+    }
 
 
 def build_rows(
@@ -257,6 +403,14 @@ def fetch_accounts(client: Any) -> list[dict[str, Any]]:
     return [_as_dict(a) for a in client.account_information.list_user_accounts(**_NO_USER).body]
 
 
+def fetch_authorizations(client: Any) -> list[dict[str, Any]]:
+    """List the broker connections, which carry the authoritative health flag."""
+    return [
+        _as_dict(a)
+        for a in client.connections.list_brokerage_authorizations(**_NO_USER).body
+    ]
+
+
 def fetch_positions(client: Any, account_id: str) -> list[dict[str, Any]]:
     """Unified positions: equities, options and crypto in one call."""
     body = _as_dict(
@@ -276,6 +430,18 @@ def fetch_balances(client: Any, account_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def _record_run(db: DB, row: dict[str, Any]) -> None:
+    """Write the sync_runs row, never masking whatever the caller is reporting.
+
+    Diagnostics must not become the failure. If this write is the thing that is
+    broken, the sync's own outcome is still what surfaces.
+    """
+    try:
+        db.insert_sync_run(row)
+    except Exception:  # noqa: BLE001 — bookkeeping must never mask the real error
+        logger.warning("could not record sync_runs row", exc_info=True)
+
+
 def sync(client: Any, db: DB, now: dt.datetime | None = None) -> list[dict[str, Any]]:
     """Run one full sync and write it. Raises SyncError rather than write junk."""
     now = now or dt.datetime.now(dt.UTC)
@@ -283,26 +449,89 @@ def sync(client: Any, db: DB, now: dt.datetime | None = None) -> list[dict[str, 
 
     accounts = fetch_accounts(client)
     if not accounts:
+        _record_run(
+            db,
+            build_run_row(synced_at, [], {}, set(), 0, "failed", "no linked accounts"),
+        )
         raise SyncError("SnapTrade returned no linked accounts.")
 
-    problems = check_freshness(accounts, now)
-    if problems:
-        raise SyncError("stale brokerage data: " + "; ".join(problems))
+    # Per account, not per sync: connection health first (the direct signal),
+    # then holdings age (the backstop).
+    problems = problems_by_account(accounts, fetch_authorizations(client), now)
+    healthy = [a for a in accounts if not problems[str(a.get("id"))]]
+    excluded = {
+        str(a.get("name") or a.get("id")): problems[str(a.get("id"))]
+        for a in accounts
+        if problems[str(a.get("id"))]
+    }
+
+    if not healthy:
+        reason = "; ".join(p for ps in excluded.values() for p in ps)
+        _record_run(
+            db,
+            build_run_row(synced_at, accounts, problems, set(), 0, "failed", reason),
+        )
+        raise SyncError("no trustworthy accounts: " + reason)
 
     positions_by_account: dict[str, list[dict[str, Any]]] = {}
     balances_by_account: dict[str, list[dict[str, Any]]] = {}
-    for account in accounts:
+    for account in healthy:
         account_id = str(account.get("id"))
         positions_by_account[account_id] = fetch_positions(client, account_id)
         balances_by_account[account_id] = fetch_balances(client, account_id)
 
     rows = build_rows(
-        accounts, positions_by_account, balances_by_account, synced_at
+        healthy, positions_by_account, balances_by_account, synced_at
     )
+    included_ids = {str(a.get("id")) for a in healthy}
     if not rows:
+        _record_run(
+            db,
+            build_run_row(
+                synced_at, accounts, problems, included_ids, 0, "failed", "zero rows"
+            ),
+        )
         raise SyncError("sync produced zero rows — refusing to record an empty snapshot.")
 
-    return db.insert_positions(rows)
+    # Write BEFORE raising: the healthy accounts' history is not recoverable
+    # later, so the alarm must never cost the data it is warning about.
+    written = db.insert_positions(rows)
+
+    partial = PartialSyncError(written, excluded) if excluded else None
+    _record_run(
+        db,
+        build_run_row(
+            synced_at,
+            accounts,
+            problems,
+            included_ids,
+            len(written),
+            "partial" if partial else "ok",
+            str(partial) if partial else None,
+        ),
+    )
+    if partial:
+        raise partial
+    return written
+
+
+def one_line(exc: BaseException, limit: int = 300) -> str:
+    """Compress an exception into a single readable line.
+
+    SnapTrade's ApiException stringifies to a dozen lines including every HTTP
+    response header, which is unreadable as an alert. Keeps the status, reason
+    and response body — where `detail` actually explains the failure — and drops
+    the header dump.
+    """
+    kept = [
+        line.strip()
+        for line in str(exc).splitlines()
+        if line.strip() and not line.strip().startswith("HTTP response headers")
+    ]
+    message = " | ".join(kept) or repr(exc)
+    if len(message) > limit:
+        message = message[: limit - 1] + "…"
+    return f"{type(exc).__name__}: {message}"
 
 
 def main() -> int:
@@ -310,9 +539,22 @@ def main() -> int:
     load_dotenv()
     try:
         written = sync(build_client(), DB.from_env())
+    except PartialSyncError as exc:
+        # Data landed AND the run fails: a red run no longer implies "no data".
+        print(f"sync: PARTIAL — {exc}", file=sys.stderr)
+        return 1
     except SyncError as exc:
         # Iron rule #4: a sync that cannot be trusted fails visibly.
         print(f"sync: FAILED — {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 — deliberate top-level catch
+        # Anything the sync did not anticipate: a SnapTrade ApiException, a
+        # Supabase outage, a malformed numeric. Reported as one readable line,
+        # because from Sprint 4 this text is what gets delivered to a phone.
+        # The traceback goes to the debug log — available with `-v`/DEBUG when
+        # actually debugging, rather than dumped into every alert.
+        logger.debug("unexpected error during sync", exc_info=True)
+        print(f"sync: FAILED — {one_line(exc)}", file=sys.stderr)
         return 1
     print(f"sync: wrote {len(written)} position rows")
     return 0

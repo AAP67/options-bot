@@ -124,6 +124,21 @@ class DB:
     def suggestions_for_run(self, run_id: str) -> list[dict[str, Any]]:
         return self.select("suggestions", filters={"run_id": run_id})
 
+    def insert_sync_run(self, row: dict[str, Any]) -> list[dict[str, Any]]:
+        """Record one sync attempt (Sprint 2) — what happened, not what we own."""
+        return self.insert("sync_runs", [row])
+
+    def latest_sync_runs(self, limit: int = 30) -> list[dict[str, Any]]:
+        """Most recent sync attempts, newest first."""
+        resp = (
+            self._client.table("sync_runs")
+            .select("*")
+            .order("synced_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return resp.data
+
     def insert_heartbeat(self, row: dict[str, Any]) -> list[dict[str, Any]]:
         """Write one proof-of-life row (Sprint 0 cron -> DB check)."""
         return self.insert("heartbeat", [row])

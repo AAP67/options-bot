@@ -14,7 +14,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIGRATIONS_DIR="$REPO_ROOT/supabase/migrations"
 
-EXPECTED_TABLES=(positions iv_history suggestions outcomes heartbeat)
+EXPECTED_TABLES=(positions iv_history suggestions outcomes heartbeat sync_runs)
 EXPECTED_INDEXES=(
   positions_synced_at_idx
   positions_symbol_idx
@@ -23,6 +23,8 @@ EXPECTED_INDEXES=(
   suggestions_ticker_idx
   outcomes_suggestion_id_idx
   heartbeat_ran_at_idx
+  sync_runs_synced_at_idx
+  sync_runs_status_idx
 )
 
 CONTAINER=""

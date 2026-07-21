@@ -31,6 +31,35 @@ pipe end-to-end, then swap real logic in last. No strategy code until data flows
 - Wire into a cron (can piggyback the heartbeat job)
 - **Exit criteria:** positions + cash land in Supabase automatically; raw sync only, zero interpretation
 
+**Carried forward — open items from Sprint 2 (recorded 2026-07-21):**
+
+- [ ] **TODO: record per-run sync metadata.** Nothing currently persists *when the
+  broker last refreshed*: `sync_status` sits on the SnapTrade account object,
+  is read by `check_freshness`, and is then discarded — `positions.raw` holds
+  only position/balance payloads. Every question below about thresholds is
+  blocked on this, and the data is not recoverable retroactively.
+  Preferred shape: a `sync_runs` table (new migration) with one row per sync —
+  run timestamp, accounts included, accounts excluded + why, and each account's
+  `sync_status`. Sprint 4 needs run metadata for the brief regardless, so this
+  is that work pulled earlier rather than extra work.
+
+- `MAX_HOLDINGS_AGE` in `src/sync.py` is **72h, provisional**. The open question is
+  whether SnapTrade refreshes holdings on non-trading days. If it pauses over
+  weekends, a Friday market holiday (Good Friday every year, sometimes July 4 /
+  Christmas) puts the Monday 01:00 UTC run at ~77h and it fails on healthy data.
+  If it refreshes daily regardless, 72h is already generous and could tighten.
+  **Blocked on evidence we are not yet collecting:** `sync_status` lives on the
+  SnapTrade *account* object, and `positions.raw` only stores position and
+  balance payloads. Nothing records when the broker last refreshed. Capture it
+  first (account-level metadata per run — a `sync_runs` table is the clean home,
+  and Sprint 4 needs run metadata anyway), then read a weekend off it.
+- Right fix long-term: measure against the last *trading session* rather than
+  wall-clock hours. Needs a market calendar — see Sprint 5, where one is required
+  anyway. Until then the hour threshold is only a backstop: `check_connections`
+  catches a genuinely broken connection directly via SnapTrade's `disabled` flag.
+- Cash rows are written per account, including Robinhood Crypto. Sprint 5's CSP
+  capacity must filter by account or it will overstate usable collateral.
+
 ### Sprint 3 — Market Data Pipe (ThetaData)
 - Theta Terminal wrapper: launch Java process, auth, health-check, query, teardown
   (works locally AND inside GH Actions runner)
@@ -59,6 +88,9 @@ All pure functions, unit-tested, driven entirely by `rules_v1.yaml`:
 - Exclusions (earnings ≤14d via yfinance, ex-div before expiry on short calls, OI/spread liquidity floors)
 - Strike selection (CC ~0.25–0.30Δ, CSP ~0.20–0.30Δ, 30–45 DTE, rank by annualized premium yield)
 - Position sizing (≤5% notional per name, ≤20% cash committed to CSPs)
+- Market calendar (needed for DTE/expiry math anyway) — once it exists, replace
+  `src/sync.py`'s wall-clock `MAX_HOLDINGS_AGE` with "has this refreshed since
+  the last market close?" See the carried-forward note under Sprint 2.
 - Real Claude rationale prompt (computed numbers in, prose out)
 - **Exit criteria:** Sunday brief now contains real ranked suggestions with full decision snapshots
 
