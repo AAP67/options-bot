@@ -137,6 +137,17 @@ def implied_vol(
     if option_price > price_at_high:
         return None  # richer than 500% vol explains; treat as bad data
 
+    # ...and the same guard at the bottom of the bracket. A quote sitting on
+    # intrinsic value carries no time value, so no volatility explains it and
+    # bisection would simply converge onto _MIN_VOL. Returning that floor would
+    # be the "zero entering the history as a real reading" this function
+    # promises never to do — and it is not harmless: it prices a deep-in-the-
+    # money contract at delta exactly 1.0, which strike selection would read as
+    # a genuine signal. Seen live on 2026-07-21: AAPL calls 110-145 against a
+    # spot of 327.74, all quoted within $0.26 of intrinsic on zero volume.
+    if option_price <= price(right, spot, strike, years, rate, low, dividend):
+        return None
+
     for _ in range(_MAX_ITERATIONS):
         mid = 0.5 * (low + high)
         modelled = price(right, spot, strike, years, rate, mid, dividend)

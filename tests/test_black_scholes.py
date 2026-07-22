@@ -126,6 +126,23 @@ def test_price_below_intrinsic_is_unanswerable_not_zero():
     assert bs.implied_vol(bs.CALL, 5.0, 150.0, 100.0, YEARS, RATE) is None
 
 
+def test_a_quote_sitting_on_intrinsic_is_unanswerable_not_a_floor_vol():
+    """The deep-ITM case: priced, not crossed, but carrying no time value.
+
+    The real numbers, seen on 2026-07-21 — AAPL calls at 110 against a spot of
+    327.74, quoted within $0.26 of intrinsic on zero volume. Bisection would
+    converge onto the bottom of the bracket and report a near-zero vol, which
+    prices the contract at delta 1.0. Sprint 5 selects on delta, so that floor
+    would read as a genuine signal rather than as an unquoted contract.
+    """
+    spot, strike, years = 327.74, 110.0, 31 / 365
+    on_intrinsic = spot - strike + 0.26
+
+    assert bs.implied_vol(bs.CALL, on_intrinsic, spot, strike, years, RATE) is None
+    # A contract with real time value on the same strike still solves.
+    assert bs.implied_vol(bs.CALL, on_intrinsic + 5.0, spot, strike, years, RATE)
+
+
 def test_absurdly_rich_price_is_rejected():
     assert bs.implied_vol(bs.CALL, 95.0, 100.0, 100.0, YEARS, RATE) is None
 
