@@ -88,6 +88,30 @@ Two consequences the original plan did not anticipate:
    swapping OI for volume is a real rules change for Sprint 5, not a free
    substitution. Decide there: pay $40, or rewrite the liquidity floor.
 
+**Open decision — track tickers beyond the current portfolio?**
+
+`src/iv.py::tracked_tickers()` takes the equity symbols from the latest sync (22
+names as of 2026-07-21) and nothing else. That is self-maintaining: buy a stock,
+and IV history starts accruing for it the same evening.
+
+The gap is cash-secured puts. A CSP is how you *acquire* a position, so the
+interesting candidates are names you do **not** hold yet — and today none of
+them are tracked. As it stands the engine can only propose CSPs on names already
+in the portfolio, which is a real strategy but a narrow one.
+
+Options:
+- Leave as-is. CSPs restricted to existing holdings.
+- Add a static watchlist (a `tickers` table, or a list in `rules_vN.yaml`) so
+  history starts accruing now for names you might want later.
+- Rely on the backfill. ThetaData sells ~3 years, so a name added in November
+  can have its history purchased retroactively.
+
+**Not urgent, and deliberately so** — unlike `positions` or `sync_runs`, this
+history *is* buyable after the fact, so deferring costs nothing but the backfill
+run. Decide alongside Sprint 5's CSP sizing, when it is clear which names the
+strategy actually wants. Whatever is chosen, the `method` stamp and the DTE
+convention must match the existing series or the readings are not comparable.
+
 **Re-check before trusting IV rank in Sprint 5 — all three, in this order:**
 
 - [ ] **Is the 30-DTE target still right?** Lives in `src/engine/iv.py` as
