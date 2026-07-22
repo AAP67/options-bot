@@ -34,14 +34,28 @@ from src.engine import black_scholes as bs
 DEFAULT_TARGET_DTE = 30
 
 # Stamped on every iv_history row. Bump this whenever the derivation changes —
-# target DTE, mid vs close, averaging, dividend handling, day-count — and then
-# REBUILD the affected series. Readings from different methods are not
-# comparable, and a percentile over a mixed series is meaningless.
-METHOD = "bs-mid-30dte-v1"
+# target DTE, mid vs close, averaging, dividend handling, day-count, or which
+# expiry is chosen — and then REBUILD the affected series. Readings from
+# different methods are not comparable, and a percentile over a mixed series is
+# meaningless.
+#
+# v2 (2026-07-22): restrict expiry choice to standard Friday expiries. The
+# backfill picks an expiry from the list as it stands *today*, but SPY-style
+# short-dated daily expiries (Mon-Thu) were only listed ~2 weeks before they
+# expired, so a historical session targeting one found no quotes and was
+# silently dropped — 13 of 34 SPY June sessions. Friday weeklies and monthlies
+# have existed for years, so they resolve at any point in the backfill window,
+# and they are the expiries the strategy actually writes against. See SPRINTS.md
+# for the fuller fix (an as-of expiry calendar) deferred to later.
+METHOD = "bs-mid-30dte-v2"
 
 # An expiry this close is dominated by pin risk and gamma rather than by the
 # volatility level being measured.
 MIN_DTE = 7
+
+# dt.date.weekday(): Monday=0 .. Friday=4. Standard weekly and monthly options
+# expire on a Friday; the daily expiries that broke the backfill do not.
+FRIDAY = 4
 
 
 def pick_expiration(
@@ -49,13 +63,20 @@ def pick_expiration(
     as_of: dt.date,
     target_dte: int = DEFAULT_TARGET_DTE,
     min_dte: int = MIN_DTE,
+    weekday: int | None = FRIDAY,
 ) -> dt.date | None:
     """The listed expiry closest to `target_dte` days after `as_of`.
 
     Ties break toward the longer expiry: its IV is the more stable of the two,
     and stability is what a percentile history wants.
+
+    `weekday` restricts the candidates to a single weekday (Friday by default,
+    see METHOD). Passing None lifts the restriction — used by tests exercising
+    the nearest/tie logic on synthetic dates, not by the daily or backfill jobs.
     """
     candidates = [e for e in expirations if (e - as_of).days >= min_dte]
+    if weekday is not None:
+        candidates = [e for e in candidates if e.weekday() == weekday]
     if not candidates:
         return None
     return min(candidates, key=lambda e: (abs((e - as_of).days - target_dte), -e.toordinal()))

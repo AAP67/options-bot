@@ -147,6 +147,40 @@ convention must match the existing series or the readings are not comparable.
   - ⚠️ **Never change any of these silently.** A method change makes new readings
     incomparable to old ones. Change it, then rebuild the series from scratch.
 
+**Deferred improvement — expiry selection is Friday-only, not as-of-accurate
+(measured 2026-07-22, method bumped to `bs-mid-30dte-v2`).**
+
+The backfill picks an expiry from the list of expiries as it stands *today*, but
+some are listed only shortly before they expire. SPY-style short-dated daily
+expiries (Mon–Thu) were listed ~2 weeks out, so a historical session targeting
+~30 DTE would choose one that had no quotes on that date and be silently
+dropped — 13 of 34 SPY June sessions in the pilot. The drop is *biased*, not
+random: whether a session survives depends on how near its 30-DTE target lands
+to a Friday, so the surviving history skews toward particular weekday/expiry
+combinations. Worse, the daily job forward has no such bug (it reads the live
+list for the same day it fetches), so backfilled history and forward history
+would measure different contracts under the same stamp — the exact seam METHOD
+exists to prevent.
+
+The ThetaData API cannot fix this at the root: `/v3/option/list/expirations`
+returns only what is listed *today* (five as-of parameter names tried, all
+ignored; rows carry no first-listed date), and it is not a paywall — no tier
+sells it. The v2 fix restricts selection to standard **Friday** expiries
+(weeklies + monthlies), which have existed for years and so resolve at any point
+in the backfill window, and are what the strategy actually writes against.
+
+Two things left for later, neither blocking:
+- **Empty-leg fallback.** Keep exact 30-DTE targeting and, when the chosen
+  expiry returns no quotes, step to the next expiry that has data. More faithful
+  to what a contemporaneous run saw, but more requests and it does *not* fix the
+  forward/backward seam on its own — the forward job must adopt the same rule.
+- **Holiday Fridays.** A standard monthly whose Friday is a market holiday
+  expires the preceding **Thursday** (e.g. Good Friday). The `weekday() == FRIDAY`
+  filter drops those, losing one monthly a few times a year. Harmless for a
+  percentile as long as it stays consistent, but revisit alongside the Sprint 5
+  market calendar, which knows the holiday dates. Any change here is a method
+  bump + full rebuild, like everything else in this list.
+
 ### Sprint 4 — Orchestration + Delivery (Walking Skeleton Complete)
 - Sunday cron: sync → fetch chains → **STUB engine** (pass-through: dumps raw eligible data, no decisions)
 - Claude API wiring with a dummy prompt ("summarize this data") to prove the call path
