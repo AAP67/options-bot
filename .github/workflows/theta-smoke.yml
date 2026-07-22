@@ -24,7 +24,7 @@ jobs:
 
       # The runner has no Java. Theta Terminal v3 requires 21+; 25 matches what
       # the Codespace runs, so local and CI exercise the same runtime.
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "25"
