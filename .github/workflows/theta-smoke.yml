@@ -1,0 +1,53 @@
+name: theta-smoke
+# Proves the Theta Terminal can run on a GitHub Actions runner — a Java process
+# that authenticates upstream and serves data over localhost, on a fresh box
+# with no Java, no jar, and no warm library cache. Everything else in Sprint 3
+# assumes this works; SPRINTS.md flags it as the sprint's risky part.
+#
+# Dispatch-only rather than scheduled: it proves the environment, and the daily
+# IV job is what actually needs to run every day. Kept afterwards as the first
+# thing to reach for when that job fails for environmental reasons.
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    # A hung Terminal would otherwise sit until the runner's 6-hour default.
+    timeout-minutes: 15
+    env:
+      THETADATA_API_KEY: ${{ secrets.THETADATA_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+      - run: uv sync
+
+      # The runner has no Java. Theta Terminal v3 requires 21+; 25 matches what
+      # the Codespace runs, so local and CI exercise the same runtime.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: check secret is present
+        run: |
+          if [ -z "$THETADATA_API_KEY" ]; then
+            echo "::error::missing repository secret: THETADATA_API_KEY"
+            exit 1
+          fi
+
+      # vendor/ is gitignored (the jar bootstraps ~98MB of libraries), so every
+      # run downloads it fresh. This is the cold-start path by design — it is
+      # what the daily job will do too.
+      - name: download Theta Terminal
+        run: |
+          mkdir -p vendor
+          curl -sSfL -o vendor/ThetaTerminalv3.jar \
+            https://downloads.thetadata.us/ThetaTerminalv3.jar
+          ls -lh vendor/ThetaTerminalv3.jar
+
+      # Starts the Terminal, derives a real ATM IV, and asserts the paywalled
+      # endpoint still raises rather than returning empty. Exits non-zero on any
+      # failure, including an implausible IV.
+      - name: theta smoke test
+        run: uv run python scripts/theta_smoke.py
