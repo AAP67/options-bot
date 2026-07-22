@@ -214,11 +214,18 @@ class ThetaTerminal:
                 body = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:300]
+            lowered_detail = detail.lower()
             # Verified live: a plan-gated endpoint answers 403 with the reason
             # in the body, not 200-with-text. Classify it so callers can tell
             # "you cannot have this" from "the Terminal is broken".
-            if any(marker in detail.lower() for marker in _SUBSCRIPTION_MARKERS):
+            if any(marker in lowered_detail for marker in _SUBSCRIPTION_MARKERS):
                 raise ThetaSubscriptionError(f"{path}: {detail.strip()}") from exc
+            # Also verified live: "no data" arrives as HTTP 472, not 200. A
+            # contract that did not trade, or a date before the market opened,
+            # is an empty answer rather than an error — return the body and let
+            # `get` map it to []. Raising here would make every weekend fail.
+            if _NO_DATA_MARKER in lowered_detail:
+                return detail
             raise ThetaError(f"{path} returned HTTP {exc.code}: {detail}") from exc
         except OSError as exc:
             raise ThetaError(f"could not reach Theta Terminal at {url}: {exc}") from exc
