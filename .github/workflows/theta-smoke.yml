@@ -1,8 +1,15 @@
 name: theta-smoke
-# Proves the Theta Terminal can run on a GitHub Actions runner — a Java process
-# that authenticates upstream and serves data over localhost, on a fresh box
-# with no Java, no jar, and no warm library cache. Everything else in Sprint 3
-# assumes this works; SPRINTS.md flags it as the sprint's risky part.
+# Proves the two things Sprint 3 can only prove against the live feed, on a
+# fresh box with no Java, no jar, and no warm library cache:
+#
+#   1. the Theta Terminal runs on a GitHub Actions runner at all — a Java
+#      process that authenticates upstream and serves data over localhost.
+#      SPRINTS.md flags this as the sprint's risky part;
+#   2. chain fetch returns clean data in CI — the sprint's second exit
+#      criterion, and the call Sprint 5 will actually make.
+#
+# Unit tests cannot cover either: they mock the Terminal and the network by
+# design, so a real API change would leave them green.
 #
 # Dispatch-only rather than scheduled: it proves the environment, and the daily
 # IV job is what actually needs to run every day. Kept afterwards as the first
@@ -51,3 +58,13 @@ jobs:
       # failure, including an implausible IV.
       - name: theta smoke test
         run: uv run python scripts/theta_smoke.py
+
+      # Sprint 3's second exit criterion: chain fetch returns clean data in CI.
+      # Fetches a whole AAPL chain and checks the numbers are defensible —
+      # deltas signed and monotonic, put-call delta parity at the money, IVs
+      # plausible, the chain straddling spot and not truncated. Runs even if
+      # the IV smoke above failed, so one dispatch reports on both pipes rather
+      # than hiding the second behind the first.
+      - name: chain smoke test
+        if: '!cancelled()'
+        run: uv run python scripts/chain_smoke.py
