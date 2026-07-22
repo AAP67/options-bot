@@ -78,6 +78,49 @@ def test_iv_upsert_is_idempotent_per_ticker_date(integration_db, tag, cleanup):
     assert float(rows[0]["atm_iv"]) == 0.42
 
 
+def test_iv_history_records_how_the_reading_was_derived(integration_db, tag, cleanup):
+    """atm_iv is computed, not quoted — so its inputs must persist with it.
+
+    call_iv and put_iv are the load-bearing pair: solved from independent
+    contracts, their agreement continuously validates the model, rate and time
+    convention. Storing only the average would discard that check, and it is
+    not reconstructable once the free data window rolls past.
+    """
+    from src.engine import iv as engine_iv
+
+    written = integration_db.upsert_iv(
+        [
+            {
+                "ticker": tag,
+                "date": "2026-07-21",
+                "atm_iv": 0.2976,
+                "call_iv": 0.2939,
+                "put_iv": 0.3013,
+                "expiration": "2026-08-21",
+                "strike": 327.5,
+                "spot": 327.74,
+                "rate": 0.0357,
+                "method": engine_iv.METHOD,
+            }
+        ]
+    )
+
+    row = written[0]
+    assert float(row["call_iv"]) == 0.2939
+    assert float(row["put_iv"]) == 0.3013
+    assert row["expiration"] == "2026-08-21"
+    assert float(row["spot"]) == 327.74
+    assert row["method"] == engine_iv.METHOD
+
+    # the (ticker, date) constraint must still collapse a re-run
+    integration_db.upsert_iv(
+        [{"ticker": tag, "date": "2026-07-21", "atm_iv": 0.31, "method": engine_iv.METHOD}]
+    )
+    rows = integration_db.iv_for_ticker(tag)
+    assert len(rows) == 1
+    assert float(rows[0]["atm_iv"]) == 0.31
+
+
 def test_suggestion_and_outcome_lifecycle(integration_db, tag, cleanup):
     written = integration_db.insert_suggestions(
         [

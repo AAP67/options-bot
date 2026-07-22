@@ -25,6 +25,7 @@ EXPECTED_INDEXES=(
   heartbeat_ran_at_idx
   sync_runs_synced_at_idx
   sync_runs_status_idx
+  iv_history_method_idx
 )
 
 CONTAINER=""

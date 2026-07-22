@@ -69,6 +69,60 @@ pipe end-to-end, then swap real logic in last. No strategy code until data flows
 - **Exit criteria:** `iv_history` backfilled + growing daily on its own; chain fetch returns clean data in CI
 - ⚠️ **Start the daily cron the moment it works** — every day it runs is history you own
 
+**Plan revision — what the FREE ThetaData tier actually allows (measured 2026-07-22):**
+| Capability | Status |
+| --- | --- |
+| Option EOD incl. **bid/ask**, OHLC, volume | ✅ free |
+| Stock EOD (underlying price) | ✅ free |
+| Expirations / strikes lists | ✅ free |
+| Interest rate (SOFR) | ✅ free |
+| History depth | ✅ 2023-06-01 → today (~3 yrs, not the 1 yr advertised) |
+| **Open interest** | ❌ needs VALUE ($40/mo) |
+| **Implied volatility + Greeks** | ❌ needs STANDARD ($80/mo) |
+
+Two consequences the original plan did not anticipate:
+1. **IV and delta are computed, not fetched** (`src/engine/black_scholes.py`). Free
+   gives quotes + underlying, which is everything Black-Scholes needs. Saves $80/mo.
+2. **`min_open_interest` cannot be evaluated on the free tier.** Volume *is* in the
+   EOD response and is a reasonable liquidity proxy for a weekly strategy — but
+   swapping OI for volume is a real rules change for Sprint 5, not a free
+   substitution. Decide there: pay $40, or rewrite the liquidity floor.
+
+**Re-check before trusting IV rank in Sprint 5 — all three, in this order:**
+
+- [ ] **Is the 30-DTE target still right?** Lives in `src/engine/iv.py` as
+  `DEFAULT_TARGET_DTE`, deliberately NOT in `rules_v1.yaml` (no loader exists yet
+  and an applied rules file must not be edited). It is arguably a strategy
+  threshold, so iron rule #2 says it belongs in rules — resolve when the loader
+  lands. **How to re-check:** the number only has to be *stable*, not optimal —
+  IV rank is a percentile against readings picked the same way. Query
+  `iv_history` and confirm the chosen expiry does not oscillate between two
+  cycles week to week (`test_selection_is_stable_across_days_as_expiries_roll`
+  covers the synthetic case; real expiry calendars are messier). If it flips,
+  the history is not comparable and the rank is noise — fix the rule, then
+  **rebuild the whole series**, never patch it forward.
+- [ ] **Are the Black-Scholes numbers sound?** Verified so far: put-call parity
+  (with and without dividends), price→IV→price round-trip across 0.10–1.50 vol
+  and four moneyness levels, reference ATM value, and — the strongest signal —
+  **live call and put IV agreeing within ~1 point** (RIOT 104.9 vs 103.9, AAPL
+  29.4 vs 30.1 on 2026-07-21). Call and put are solved from independent quotes,
+  so agreement means the model, rate and time convention are consistent.
+  **How to re-check:** log both sides, not just the average. A widening
+  call/put gap is the canary — it means an assumption drifted. Candidates below.
+- [ ] **Known approximations, none yet validated against a reference:**
+  - **Dividends assumed 0.** Wrong for dividend payers; inflates put IV and
+    deflates call IV. Averaging the two hides most of it. yfinance already
+    supplies ex-div dates in Sprint 5 — feed a yield in and see if the call/put
+    gap narrows.
+  - **American exercise ignored** (European Black-Scholes). Small at 30-45 DTE
+    near the money, and it cancels out of a percentile.
+  - **SOFR used as a continuously-compounded rate** though it is quoted simple.
+    Worth ~0.01 vol points at 30 DTE; correct with `ln(1+r)` if ever material.
+  - **Calendar days, not trading days** (`year_fraction`, /365). Consistent, and
+    needs no market calendar — revisit alongside the Sprint 5 calendar work.
+  - ⚠️ **Never change any of these silently.** A method change makes new readings
+    incomparable to old ones. Change it, then rebuild the series from scratch.
+
 ### Sprint 4 — Orchestration + Delivery (Walking Skeleton Complete)
 - Sunday cron: sync → fetch chains → **STUB engine** (pass-through: dumps raw eligible data, no decisions)
 - Claude API wiring with a dummy prompt ("summarize this data") to prove the call path
