@@ -1,8 +1,12 @@
 name: daily
 # Daily data collection. Deliberately separate from ci.yml: a red X here means
 # "the data pipe broke", not "somebody's formatting is off" (iron rule #4 — an
-# alert nobody trusts is not an alert). Sprint 3's EOD IV snapshot becomes a
-# second step in this same job.
+# alert nobody trusts is not an alert).
+#
+# Two independent jobs. `iv` runs after `sync` because it reads the ticker list
+# from positions, but with `if: always()` — a broker outage must not also cost a
+# day of IV history, and tracked_tickers() falls back to the last good snapshot.
+# Losing both to one failure would be the expensive mistake.
 on:
   workflow_dispatch:      # manual re-run after a failure, without waiting a day
   schedule:
@@ -48,3 +52,54 @@ jobs:
       # delivery lands in Sprint 4.
       - name: sync portfolio
         run: uv run python -m src.sync
+
+  # One ATM IV reading per tracked ticker, appended to iv_history. This is the
+  # series IV rank is a percentile over, so a day missed is a permanent hole
+  # unless it is backfilled deliberately.
+  iv:
+    needs: sync
+    if: always()          # a failed portfolio sync must not skip IV collection
+    runs-on: ubuntu-latest
+    # ~6 min for 22 tickers at the FREE tier's 20 req/min, plus Terminal
+    # startup. 30 leaves room for more tickers without silently truncating.
+    timeout-minutes: 30
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      THETADATA_API_KEY: ${{ secrets.THETADATA_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+      - run: uv sync
+
+      # The runner has no Java. Theta Terminal v3 needs 21+; 25 matches the
+      # development environment so both exercise the same runtime.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: check secrets are present
+        run: |
+          missing=""
+          for name in SUPABASE_URL SUPABASE_SERVICE_KEY THETADATA_API_KEY; do
+            [ -z "${!name}" ] && missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::missing repository secrets:$missing"
+            exit 1
+          fi
+
+      # vendor/ is gitignored (the jar bootstraps ~98MB of libraries), so this
+      # is always the cold path — measured at 12s on a runner.
+      - name: download Theta Terminal
+        run: |
+          mkdir -p vendor
+          curl -sSfL -o vendor/ThetaTerminalv3.jar \
+            https://downloads.thetadata.us/ThetaTerminalv3.jar
+
+      # Picks the newest session that actually has data — FREE data lags a day
+      # and the market is shut at weekends, so most runs write the previous
+      # session and weekend runs simply re-upsert Friday.
+      - name: snapshot IV
+        run: uv run python -m src.iv
