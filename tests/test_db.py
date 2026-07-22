@@ -157,6 +157,32 @@ def test_latest_positions_filters_by_newest_synced_at():
     assert ("order", "synced_at", True) in client.calls
 
 
+def test_latest_iv_date_returns_the_newest_session_and_scopes_by_method():
+    client = FakeClient(rows=[{"date": "2026-07-21"}])
+    db = DB(client)
+
+    out = db.latest_iv_date(method="bs-mid-30dte-v2")
+
+    assert out == "2026-07-21"
+    assert client.last_table == "iv_history"
+    assert ("order", "date", True) in client.calls
+    assert ("limit", 1) in client.calls
+    assert ("eq", "method", "bs-mid-30dte-v2") in client.calls
+
+
+def test_latest_iv_date_is_none_on_an_empty_series():
+    db = DB(FakeClient(rows=[]))
+    assert db.latest_iv_date() is None
+
+
+def test_latest_iv_date_without_a_method_does_not_filter():
+    client = FakeClient(rows=[{"date": "2026-07-21T00:00:00+00:00"}])
+    db = DB(client)
+
+    assert db.latest_iv_date() == "2026-07-21"  # trims a timestamp to the date
+    assert not any(call[0] == "eq" for call in client.calls)
+
+
 # -- from_env ---------------------------------------------------------------
 
 

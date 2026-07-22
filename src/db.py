@@ -121,6 +121,24 @@ class DB:
     def iv_for_ticker(self, ticker: str) -> list[dict[str, Any]]:
         return self.select("iv_history", filters={"ticker": ticker})
 
+    def latest_iv_date(self, method: str | None = None) -> str | None:
+        """The newest session stored in iv_history, as an ISO string, or None.
+
+        `method` scopes the query to one derivation, so a stale-method row does
+        not count as "we already have this session" — the caller parses and
+        compares. Thin I/O only; the date arithmetic lives in `src.iv`.
+        """
+        query = (
+            self._client.table("iv_history")
+            .select("date")
+            .order("date", desc=True)
+            .limit(1)
+        )
+        if method is not None:
+            query = query.eq("method", method)
+        rows = query.execute().data
+        return str(rows[0]["date"])[:10] if rows else None
+
     def suggestions_for_run(self, run_id: str) -> list[dict[str, Any]]:
         return self.select("suggestions", filters={"run_id": run_id})
 

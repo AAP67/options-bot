@@ -46,6 +46,16 @@ SESSION_PROBE_SYMBOL = "SPY"
 # week-old data.
 MAX_SESSION_LOOKBACK = 7
 
+# The daily job fills every session between the last stored reading and the
+# newest one, so a missed run (outage, a re-run that never happened, two
+# sessions landing in one publication window) heals itself instead of leaving a
+# permanent hole — daily.yml calls that out explicitly. But a gap this large is
+# not a hiccup: it is an outage, and the deliberate, resumable backfill is the
+# right tool. Fill the most recent MAX_GAP_SESSIONS and say loudly that older
+# holes remain, rather than turning the nightly cron into a many-hour job or
+# quietly papering over weeks.
+MAX_GAP_SESSIONS = 10
+
 
 class IVError(RuntimeError):
     """A snapshot that cannot be trusted — never swallowed, never silent."""
@@ -333,19 +343,99 @@ def snapshot(
     return written
 
 
+def sessions_to_fill(
+    theta: ThetaTerminal,
+    db: DB,
+    latest: dt.date,
+    method: str = engine_iv.METHOD,
+) -> list[dt.date]:
+    """Trading sessions still missing from iv_history, oldest first.
+
+    Normally just `[latest]`. When runs were missed, every session between the
+    last stored reading and `latest` is filled too, so a gap heals rather than
+    becoming a permanent hole. The list comes from `latest_session`, which asks
+    the feed which days actually traded — no market calendar needed (that is
+    Sprint 5).
+
+    Two deliberate bounds:
+    - An empty series is seeded with the current session only. Building history
+      from scratch is the backfill's job, not the nightly cron's — otherwise a
+      first run, or a freshly added ticker, would try to derive three years.
+    - The gap is capped at MAX_GAP_SESSIONS. Beyond that it is an outage, not a
+      hiccup, and the resumable backfill is the right tool.
+    """
+    stored = db.latest_iv_date(method)
+    last = dt.date.fromisoformat(stored) if stored else None
+    if last is None:
+        return [latest]
+    if last >= latest:
+        return []  # already current — e.g. a re-run on the same day
+
+    sessions = [latest]
+    cursor = latest - dt.timedelta(days=1)
+    while cursor > last and len(sessions) < MAX_GAP_SESSIONS:
+        session = latest_session(theta, cursor)
+        if session <= last:
+            break
+        sessions.append(session)
+        cursor = session - dt.timedelta(days=1)
+    return sorted(sessions)
+
+
+def run_daily(
+    theta: ThetaTerminal,
+    db: DB,
+    tickers: list[str],
+    sessions: list[dt.date],
+) -> list[dict[str, Any]]:
+    """Snapshot each session in order, writing as it goes.
+
+    Per-ticker failures are collected across every session and raised together
+    as one PartialIVError, so a single bad ticker-day cannot mask the rest of
+    the run. A whole-session IVError (nothing derivable at all) propagates
+    immediately — that is not a hiccup.
+    """
+    written: list[dict[str, Any]] = []
+    excluded: dict[str, str] = {}
+    for session in sessions:
+        try:
+            written.extend(snapshot(theta, db, tickers, session))
+        except PartialIVError as exc:
+            written.extend(exc.written)
+            for ticker, why in exc.excluded.items():
+                excluded[f"{ticker}@{session}"] = why
+    if excluded:
+        raise PartialIVError(written, excluded)
+    return written
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     load_dotenv()
 
-    as_of: dt.date | None = None
     try:
         db = DB.from_env()
         tickers = tracked_tickers(db)
         with ThetaTerminal() as theta:
             # Not today: the market may be shut and FREE data lags a day.
-            as_of = latest_session(theta, dt.date.today())
-            logger.info("snapshotting %d ticker(s) as of %s", len(tickers), as_of)
-            written = snapshot(theta, db, tickers, as_of)
+            latest = latest_session(theta, dt.date.today())
+            sessions = sessions_to_fill(theta, db, latest)
+            if not sessions:
+                print(f"iv: already current for {latest}")
+                return 0
+            if len(sessions) > 1:
+                logger.warning(
+                    "filling %d missing session(s): %s..%s",
+                    len(sessions), sessions[0], sessions[-1],
+                )
+            if len(sessions) >= MAX_GAP_SESSIONS:
+                logger.error(
+                    "gap capped at %d sessions; if older holes remain, run the "
+                    "backfill to fill them",
+                    MAX_GAP_SESSIONS,
+                )
+            logger.info("snapshotting %d ticker(s) over %s", len(tickers), sessions)
+            written = run_daily(theta, db, tickers, sessions)
     except PartialIVError as exc:
         print(f"iv: PARTIAL — {exc}", file=sys.stderr)
         return 1
@@ -357,7 +447,7 @@ def main() -> int:
         print(f"iv: FAILED — {type(exc).__name__}: {exc}"[:300], file=sys.stderr)
         return 1
 
-    print(f"iv: wrote {len(written)} reading(s) for {as_of}")
+    print(f"iv: wrote {len(written)} reading(s) across {len(sessions)} session(s)")
     return 0
 
 

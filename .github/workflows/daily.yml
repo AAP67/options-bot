@@ -53,9 +53,12 @@ jobs:
       - name: sync portfolio
         run: uv run python -m src.sync
 
-  # One ATM IV reading per tracked ticker, appended to iv_history. This is the
-  # series IV rank is a percentile over, so a day missed is a permanent hole
-  # unless it is backfilled deliberately.
+  # One ATM IV reading per tracked ticker, appended to iv_history — the series
+  # IV rank is a percentile over. The job self-heals: it fills every session
+  # from the last stored reading up to the newest, so a missed run is caught up
+  # the next night rather than leaving a permanent hole. A gap too large for
+  # that (an outage) is capped and left to the deliberate backfill — see
+  # MAX_GAP_SESSIONS in src/iv.py.
   iv:
     needs: sync
     if: always()          # a failed portfolio sync must not skip IV collection

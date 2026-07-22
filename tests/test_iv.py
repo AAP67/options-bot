@@ -55,15 +55,20 @@ class FakeTheta:
 
 
 class FakeDB:
-    def __init__(self, positions=None):
+    def __init__(self, positions=None, latest_iv=None):
         self.positions = positions or []
+        self._latest_iv = latest_iv  # ISO string or None, like the real layer
         self.written: list[dict] = []
 
     def latest_positions(self):
         return self.positions
 
+    def latest_iv_date(self, method=None):
+        return self._latest_iv
+
     def upsert_iv(self, rows):
-        self.written = rows
+        # Accumulate across sessions, mirroring separate upserts per call.
+        self.written.extend(rows)
         return rows
 
 
@@ -262,6 +267,85 @@ def test_latest_session_stops_at_the_lookback_limit():
     with pytest.raises(iv.IVError):
         iv.latest_session(theta, dt.date(2026, 7, 22), max_lookback=3)
     assert len(theta.probed) == 4  # the day itself plus three back
+
+
+# -- gap filling (self-heal) ------------------------------------------------
+
+
+def test_normal_run_fills_only_the_latest_session():
+    """The common case: yesterday is stored, today is the one new session."""
+    latest = dt.date(2026, 7, 21)
+    db = FakeDB(latest_iv="2026-07-20")
+    theta = SessionTheta({dt.date(2026, 7, 20), latest})
+    assert iv.sessions_to_fill(theta, db, latest) == [latest]
+
+
+def test_a_missed_session_is_healed_next_run():
+    """Tuesday's run failed; Wednesday's must catch Tuesday up, oldest first."""
+    mon, tue, wed = dt.date(2026, 7, 20), dt.date(2026, 7, 21), dt.date(2026, 7, 22)
+    db = FakeDB(latest_iv="2026-07-20")  # last stored is Monday
+    theta = SessionTheta({mon, tue, wed})
+    assert iv.sessions_to_fill(theta, db, wed) == [tue, wed]
+
+
+def test_a_weekend_is_not_treated_as_a_gap():
+    """Friday stored, Monday latest: only Monday is missing, not Sat/Sun."""
+    friday, monday = dt.date(2026, 7, 17), dt.date(2026, 7, 20)
+    db = FakeDB(latest_iv="2026-07-17")
+    theta = SessionTheta({friday, monday})  # no weekend sessions exist
+    assert iv.sessions_to_fill(theta, db, monday) == [monday]
+
+
+def test_already_current_asks_for_no_sessions():
+    """A same-day re-run must not re-derive what is already stored."""
+    latest = dt.date(2026, 7, 21)
+    db = FakeDB(latest_iv="2026-07-21")
+    assert iv.sessions_to_fill(SessionTheta({latest}), db, latest) == []
+
+
+def test_an_empty_series_seeds_only_the_current_session():
+    """First run ever: seed today, never backfill three years from the cron."""
+    latest = dt.date(2026, 7, 21)
+    db = FakeDB(latest_iv=None)
+    assert iv.sessions_to_fill(SessionTheta({latest}), db, latest) == [latest]
+
+
+def test_a_huge_gap_is_capped_and_left_to_the_backfill():
+    """An outage-sized gap fills the most recent sessions, not all of them."""
+    latest = dt.date(2026, 7, 31)
+    db = FakeDB(latest_iv="2026-01-01")  # months ago
+    every_day = {latest - dt.timedelta(days=n) for n in range(0, 60)}
+    sessions = iv.sessions_to_fill(SessionTheta(every_day), db, latest)
+    assert len(sessions) == iv.MAX_GAP_SESSIONS
+    assert sessions[-1] == latest  # the newest is always covered
+    assert sessions == sorted(sessions)
+
+
+def test_run_daily_writes_every_session_in_the_gap():
+    mon, tue = dt.date(2026, 7, 20), dt.date(2026, 7, 21)
+    db = FakeDB()
+    written = iv.run_daily(FakeTheta(), db, ["AAPL", "MSFT"], [mon, tue])
+    assert len(written) == 4  # two tickers x two sessions
+    assert {r["date"] for r in written} == {"2026-07-20", "2026-07-21"}
+
+
+def test_run_daily_reports_partials_across_sessions_without_losing_good_rows():
+    """A ticker bad on one session must not hide good rows on the others."""
+
+    class BadOnMSFT(FakeTheta):
+        def get(self, path, **params):
+            if path.endswith("/stock/history/eod") and params["symbol"] == "MSFT":
+                return []
+            return super().get(path, **params)
+
+    mon, tue = dt.date(2026, 7, 20), dt.date(2026, 7, 21)
+    db = FakeDB()
+    with pytest.raises(iv.PartialIVError) as caught:
+        iv.run_daily(BadOnMSFT(), db, ["AAPL", "MSFT"], [mon, tue])
+
+    # AAPL survived both sessions; MSFT failed on both, tagged by session.
+    assert {r["ticker"] for r in caught.value.written} == {"AAPL"}
+    assert set(caught.value.excluded) == {"MSFT@2026-07-20", "MSFT@2026-07-21"}
 
 
 # -- ticker selection -------------------------------------------------------
