@@ -10,12 +10,19 @@ you can leave running overnight — see [SPRINTS.md](../SPRINTS.md), Sprint 3.
 ## Before you start
 
 Two hard constraints, both because the free ThetaData key allows **one request
-at a time**:
+at a time** — one Theta Terminal, one in-flight request:
 
 - **Only one thing may hit the key at once.** While the backfill runs, do not
   run the daily job, the smoke tests, or a second backfill on any machine.
-- **Do not overlap the scheduled CI daily run at 01:00 UTC.** It uses the same
-  key from a GitHub runner. Start the backfill after ~01:10 UTC.
+- **Pause the daily CI cron for the whole run — don't try to dodge it.** The
+  01:00 UTC `daily.yml` job spins up its own Terminal on the runner against the
+  same key, so any overlap gets one side rejected. This is a ~14-hour job that
+  spans most of a day and can resume across a midnight, so there is no safe
+  window to slot it into: disable the schedule, run, then re-enable (steps
+  below). The gap is self-healing — `src/iv.py` fills every session from the
+  last stored reading up to the newest on the next run (capped at
+  `MAX_GAP_SESSIONS`), so the one or two nights the cron is off are caught up
+  automatically when you switch it back on.
 
 And, as always: `.env` holds live secrets — copy it to a new machine securely,
 never commit it (iron rule #3).
@@ -44,6 +51,19 @@ EOF
 mkdir -p vendor
 curl -sSfL -o vendor/ThetaTerminalv3.jar https://downloads.thetadata.us/ThetaTerminalv3.jar
 ```
+
+## Pause the daily cron first
+
+Stop the scheduled run so it cannot grab the key mid-backfill. This toggles the
+schedule via the GitHub API — no commit, and `workflow_dispatch` (manual re-run)
+still works if you need it:
+
+```bash
+gh workflow disable daily.yml
+gh workflow list --all | grep -i daily   # confirm it reads "disabled_manually"
+```
+
+Leave it off until the backfill has fully finished — including any resumes.
 
 ## Run it
 
@@ -99,9 +119,17 @@ newest stored session under the current method:
 uv run python -c "from src.config import load_dotenv; load_dotenv(); from src.db import DB; print(DB.from_env().latest_iv_date('bs-mid-30dte-v2'))"
 ```
 
-From then on the daily CI job keeps the series current and self-heals any missed
-session (see `src/iv.py`), so the backfill is a one-time seed — re-run only to
-add a new ticker's history (`--tickers NEWSYM`).
+Then re-enable the daily cron you paused above:
+
+```bash
+gh workflow enable daily.yml
+gh workflow list --all | grep -i daily   # confirm it is active again
+```
+
+From then on the daily CI job keeps the series current and self-heals the nights
+it was paused, plus any later missed session (see `src/iv.py`), so the backfill
+is a one-time seed — re-run only to add a new ticker's history
+(`--tickers NEWSYM`), pausing the cron again for the duration.
 
 ## Method note
 
