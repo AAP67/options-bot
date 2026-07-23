@@ -1,0 +1,77 @@
+name: weekly
+# The Sunday walking-skeleton run: sync -> fetch chains -> STUB engine ->
+# persist -> Claude prose -> Telegram. One automated brief lands on the phone,
+# proving every pipe end to end. The engine is still the stub, so the brief is a
+# dumb summary until Sprint 5 swaps in real strategy logic.
+#
+# MANUAL-TRIGGER ONLY for now. The `schedule` block is deliberately commented
+# out: a dumb weekly brief is not worth receiving, and the run shares the FREE
+# ThetaData key with the daily job (one request at a time). Prove the loop once
+# with a manual run, then turn the schedule on in Sprint 5 when the brief is real
+# — mind the daily 01:00 UTC run when picking the hour (see daily.yml).
+on:
+  workflow_dispatch:
+  # schedule:
+  #   # Sunday ~18:00 UTC. Enable in Sprint 5, after the real engine lands.
+  #   - cron: "0 18 * * 0"
+
+# Never let two runs write suggestions for the same run at once; also keep it
+# off the daily job's ThetaData key window.
+concurrency:
+  group: weekly
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    # Sync + one chain fetch per tracked ticker at the FREE tier's 20 req/min,
+    # plus Terminal startup and one Claude call. 30 leaves headroom.
+    timeout-minutes: 30
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      SNAPTRADE_CLIENT_ID: ${{ secrets.SNAPTRADE_CLIENT_ID }}
+      SNAPTRADE_CONSUMER_KEY: ${{ secrets.SNAPTRADE_CONSUMER_KEY }}
+      THETADATA_API_KEY: ${{ secrets.THETADATA_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+      - run: uv sync
+
+      # Theta Terminal v3 needs Java 21+; 25 matches the dev environment.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      # Fail before any network call if a secret is missing or was renamed —
+      # otherwise it surfaces as a confusing auth failure mid-run.
+      - name: check secrets are present
+        run: |
+          missing=""
+          for name in SUPABASE_URL SUPABASE_SERVICE_KEY \
+                      SNAPTRADE_CLIENT_ID SNAPTRADE_CONSUMER_KEY \
+                      THETADATA_API_KEY ANTHROPIC_API_KEY \
+                      TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID; do
+            [ -z "${!name}" ] && missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::missing repository secrets:$missing"
+            exit 1
+          fi
+
+      # vendor/ is gitignored (the jar bootstraps ~98MB of libraries), so this
+      # is always the cold path — ~12s on a runner.
+      - name: download Theta Terminal
+        run: |
+          mkdir -p vendor
+          curl -sSfL -o vendor/ThetaTerminalv3.jar \
+            https://downloads.thetadata.us/ThetaTerminalv3.jar
+
+      # One brief, delivered. Exits non-zero (and the run goes red) on any
+      # broken pipe rather than delivering stale or partial nonsense.
+      - name: run the weekly brief
+        run: uv run python -m src.weekly
