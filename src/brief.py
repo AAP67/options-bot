@@ -12,13 +12,17 @@ deterministic Python and handed to Claude as text. Claude describes what it is
 given; it never picks a strike, ranks a candidate, or computes a figure. The
 system prompt states that boundary so it is enforced even for the stub.
 
-Telegram delivery is the next step; for now this module only produces the prose.
+`summarize` produces the prose; `deliver` pushes it to Telegram. Wiring the two
+onto a real weekly run — sync, fetch, engine, brief — is the orchestration step.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import urllib.error
+import urllib.request
 from typing import Any
 
 import anthropic
@@ -31,6 +35,15 @@ MODEL = "claude-opus-4-8"
 # A brief is short prose; 1024 keeps the non-streaming call well under the SDK's
 # ~10-minute timeout guard. Sprint 5's real brief can revisit this.
 MAX_TOKENS = 1024
+
+# Telegram delivery. The Bot API is a plain HTTPS POST — no SDK, matching the
+# stdlib-urllib style of src/theta.py.
+TELEGRAM_API = "https://api.telegram.org"
+
+# Telegram rejects a single message over 4096 characters. The stub brief is far
+# short of that; splitting a long brief into several messages is Sprint 5's
+# problem, so for now an over-long brief fails loudly rather than being cut.
+TELEGRAM_MAX_CHARS = 4096
 
 # The boundary, stated to the model. Even with a dummy prompt, Claude must never
 # be the thing that computes or ranks — that is always deterministic Python.
@@ -116,3 +129,65 @@ def summarize(
             f"Claude returned no text (stop_reason={getattr(response, 'stop_reason', None)})."
         )
     return text
+
+
+def deliver(
+    text: str,
+    *,
+    token: str | None = None,
+    chat_id: str | None = None,
+    timeout: float = 30.0,
+) -> int:
+    """Send the brief to Telegram and return the delivered message id.
+
+    Send-only: the bot pushes one message and never reads replies or takes
+    commands (and certainly never places a trade — iron rule #5). Credentials
+    come from the environment unless passed explicitly. Any failure — missing
+    secret, network error, or a Telegram rejection — raises BriefError so a
+    broken delivery alerts rather than silently swallowing the brief (iron rule
+    #4).
+    """
+    token = (token or os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
+    chat_id = (chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
+    if not token or token == "placeholder":
+        raise BriefError("TELEGRAM_BOT_TOKEN must be set (see .env.example).")
+    if not chat_id or chat_id == "placeholder":
+        raise BriefError("TELEGRAM_CHAT_ID must be set (see .env.example).")
+    if not text.strip():
+        raise BriefError("refusing to deliver an empty brief.")
+    if len(text) > TELEGRAM_MAX_CHARS:
+        raise BriefError(
+            f"brief is {len(text)} chars; Telegram caps a message at "
+            f"{TELEGRAM_MAX_CHARS} (splitting is Sprint 5)."
+        )
+
+    payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+    # The token lives in the URL path; never log the URL.
+    request = urllib.request.Request(
+        f"{TELEGRAM_API}/bot{token}/sendMessage",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        # A bad chat id or token comes back as 4xx with the reason in the body.
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        raise BriefError(
+            f"Telegram returned HTTP {exc.code}: {detail.strip()}"
+        ) from exc
+    except OSError as exc:
+        raise BriefError(f"could not reach Telegram: {exc}") from exc
+
+    try:
+        result = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise BriefError(f"Telegram returned non-JSON: {body[:200]}") from exc
+    if not result.get("ok"):
+        raise BriefError(f"Telegram rejected the message: {result.get('description')}")
+
+    message_id = result.get("result", {}).get("message_id")
+    logger.info("delivered brief to Telegram (message_id=%s)", message_id)
+    return message_id

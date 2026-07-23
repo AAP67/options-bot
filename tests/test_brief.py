@@ -8,6 +8,9 @@ is a fake — no network, no key, the suite stays hermetic.
 
 from __future__ import annotations
 
+import io
+import json
+import urllib.error
 from typing import Any
 
 import anthropic
@@ -135,3 +138,125 @@ def test_build_client_builds_with_a_real_key(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-real")
     client = brief.build_client()
     assert isinstance(client, anthropic.Anthropic)
+
+
+# -- Telegram delivery ------------------------------------------------------
+
+
+class FakeHTTPResponse:
+    """Context-manager stand-in for urlopen's return value."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __enter__(self) -> FakeHTTPResponse:
+        return self
+
+    def __exit__(self, *_: Any) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def fake_urlopen(
+    captured: dict[str, Any],
+    *,
+    body: bytes = b'{"ok": true, "result": {"message_id": 42}}',
+    error: Exception | None = None,
+):
+    """A urlopen replacement that records the request and returns `body`."""
+
+    def _urlopen(request: Any, timeout: float | None = None) -> FakeHTTPResponse:
+        captured["request"] = request
+        captured["timeout"] = timeout
+        if error is not None:
+            raise error
+        return FakeHTTPResponse(body)
+
+    return _urlopen
+
+
+CREDS = {"token": "12345:secret", "chat_id": "999"}
+
+
+def test_deliver_posts_the_text_and_returns_the_message_id(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(brief.urllib.request, "urlopen", fake_urlopen(captured))
+
+    message_id = brief.deliver("this week's brief", **CREDS)
+
+    assert message_id == 42
+    request = captured["request"]
+    assert request.method == "POST"
+    assert request.full_url == "https://api.telegram.org/bot12345:secret/sendMessage"
+    sent = json.loads(request.data)
+    assert sent == {"chat_id": "999", "text": "this week's brief"}
+
+
+def test_deliver_reads_credentials_from_the_environment(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "env-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "env-chat")
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(brief.urllib.request, "urlopen", fake_urlopen(captured))
+
+    brief.deliver("hi")
+    assert "botenv-token/" in captured["request"].full_url
+
+
+@pytest.mark.parametrize("missing", ["token", "chat_id"])
+def test_deliver_fails_loudly_when_a_credential_is_missing(monkeypatch, missing):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    creds = dict(CREDS)
+    creds[missing] = "placeholder"
+    with pytest.raises(brief.BriefError, match="TELEGRAM_"):
+        brief.deliver("brief", **creds)
+
+
+def test_deliver_refuses_an_empty_brief():
+    with pytest.raises(brief.BriefError, match="empty"):
+        brief.deliver("   ", **CREDS)
+
+
+def test_deliver_refuses_a_brief_over_the_telegram_limit():
+    too_long = "x" * (brief.TELEGRAM_MAX_CHARS + 1)
+    with pytest.raises(brief.BriefError, match="caps a message"):
+        brief.deliver(too_long, **CREDS)
+
+
+def test_deliver_raises_when_telegram_reports_not_ok(monkeypatch):
+    body = b'{"ok": false, "description": "Bad Request: chat not found"}'
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        brief.urllib.request, "urlopen", fake_urlopen(captured, body=body)
+    )
+    with pytest.raises(brief.BriefError, match="chat not found"):
+        brief.deliver("brief", **CREDS)
+
+
+def test_deliver_wraps_an_http_error(monkeypatch):
+    err = urllib.error.HTTPError(
+        url="https://api.telegram.org/botX/sendMessage",
+        code=401,
+        msg="Unauthorized",
+        hdrs=None,
+        fp=io.BytesIO(b'{"ok": false, "description": "Unauthorized"}'),
+    )
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        brief.urllib.request, "urlopen", fake_urlopen(captured, error=err)
+    )
+    with pytest.raises(brief.BriefError, match="HTTP 401"):
+        brief.deliver("brief", **CREDS)
+
+
+def test_deliver_wraps_a_network_error(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        brief.urllib.request,
+        "urlopen",
+        fake_urlopen(captured, error=OSError("connection refused")),
+    )
+    with pytest.raises(brief.BriefError, match="could not reach Telegram"):
+        brief.deliver("brief", **CREDS)

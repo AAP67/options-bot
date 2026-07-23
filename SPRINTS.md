@@ -189,6 +189,32 @@ Two things left for later, neither blocking:
 - **Exit criteria:** every Sunday, an automated (dumb) brief arrives on your phone.
   All pipes live: broker → DB → data → LLM → delivery. Zero strategy logic exists yet.
 
+**One-time Telegram setup (needed before the first real send).** `src/brief.py`'s
+`deliver()` needs two secrets — `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (both
+already placeholders in `.env.example`; put real values in local `.env` and in
+GitHub Actions secrets — iron rule #3). To get them:
+
+1. **Create the bot.** In Telegram, message [@BotFather](https://t.me/BotFather),
+   send `/newbot`, follow the prompts. It returns a token like
+   `123456789:AAE...` → that is `TELEGRAM_BOT_TOKEN`.
+2. **Start a chat with your new bot** (open it and send it any message, e.g.
+   `hi`). A bot cannot message you until you have messaged it first — skip this
+   and delivery fails with `403: bot can't initiate conversation`.
+3. **Find your chat id.** Visit
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser (token from step
+   1). In the JSON, read `result[].message.chat.id` — that integer is
+   `TELEGRAM_CHAT_ID`. (Alternatively message [@userinfobot](https://t.me/userinfobot),
+   which replies with your id.)
+4. **Smoke-test the pipe once** (proves delivery end to end before Sprint 5):
+   `uv run python -c "from src.config import load_dotenv; load_dotenv(); from src
+   import brief; brief.deliver('options-bot: hello')"` — a message should land on
+   your phone. `deliver()` fails loudly (BriefError) if either secret is missing
+   or Telegram rejects the send.
+
+Keep the weekly cron **manual-trigger only** (`workflow_dispatch`, no `schedule`)
+until Sprint 5's real engine lands — prove the loop once, then no weekly stub
+spam. Turn the schedule on when the brief is worth receiving.
+
 ---
 
 ## PHASE B — LOGIC (Sprints 5–7)
